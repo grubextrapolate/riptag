@@ -1,28 +1,11 @@
 #!/usr/bin/perl -w
-#
-# riptag.pl - rip cds to mp3 format using CDDB info
-# Copyright (C) 2003-2004 Russ Burdick, grub@extrapolation.net
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-#
 
-use lib qw(/path/to/dir/with/CDDB_get2);
+use lib qw(.);
 use CDDB_get2 qw( get_cddb get_discids );
 #use CDDB_get;
 #use Env;
 use Getopt::Long;
+use String::ShellQuote;
 
 ### BEGIN VARIABLE DEFINITIONS
 my (
@@ -45,7 +28,11 @@ my (
 
       %cd,                  # info on the current disc
 
-      $cddb_dir             # Local CDDB directory
+      $cddb_dir,            # Local CDDB directory
+
+      $id3ren_path,         # full path to id3ren
+      $lame_path,           # full path to lame
+      $cdparanoia_path,     # full path to cdparanoia
    );
 #### END VARIABLE DEFINITIONS
 
@@ -54,28 +41,40 @@ sub fixname {
    $name = shift;
    $name2 = $name;
 
+   $name2 =~ s/\[/\-/g;
+   $name2 =~ s/\]//g;
    $name2 =~ s/://g;
    $name2 =~ s/: +/-/g;
    $name2 =~ s/\//-/g;
+   $name2 =~ s/\) \(/-/g;
    $name2 =~ s/\) //g;
    $name2 =~ s/ \(/-/g;
    $name2 =~ s/\(//g;
    $name2 =~ s/12"/12\.inch/g;
+   $name2 =~ s/7"/7\.inch/g;
    $name2 =~ s/["',!\?\)]+//g;
+   $name2 =~ s/["',!\?\)¿¡]+//g;
    $name2 =~ s/&+/and/g;
+   $name2 =~ s/%/percent/g;
    $name2 =~ s/\++/and/g;
    $name2 =~ s/ - /-/g;
    $name2 =~ tr/A-Z /a-z./;
+   $name2 =~ s/^\.+//;
    $name2 =~ s/\.\.+/\./g;
    $name2 =~ s/-\./\-/g;
    $name2 =~ s/\.\-/\-/g;
+   $name2 =~ s/\*/\-/g;
+   $name2 =~ s/\-\./\./g;
 #   $name2 =~ s/\\n//g;
 
    return($name2);
 }
 
-$cddev = "/dev/cdrom";
-$cddb_dir = "$ENV{'HOME'}/.cddb";
+$cddev           = "/dev/cdrom";
+$cddb_dir        = "$ENV{'HOME'}/.cddb";
+$id3ren_path     = "/home/rburdick/tmp/rip/id3ren";
+$lame_path       = "/usr/bin/lame";
+$cdparanoia_path = "/usr/bin/cdparanoia";
 
 # Please don't change this when sending patches.
 $VERSION="0.0.3 (23 Feb 2002)";
@@ -89,6 +88,22 @@ if ($version_opt) {
    print "Version $VERSION\n";
    exit;
 }
+
+if (! -e $id3ren_path)
+{
+   print "\nWARNING: can't find id3ren at $id3ren_path!\n";
+}
+
+if (! -e $lame_path)
+{
+   print "\nWARNING: can't find lame at $lame_path!\n";
+}
+
+if (! -e $cdparanoia_path)
+{
+   print "\nWARNING: can't find cdparanoia at $cdparanoia_path!\n";
+}
+
 
 $user_input = "y";
 while ( ( $user_input ne "n" ) && ( $user_input ne "N" ) ) {
@@ -134,11 +149,14 @@ sub get_disc_info {
    if ( -d "$cddb_dir" ) {
       print "Using data found in $cddb_dir\n";
       $cdh = read_local_cddb();
-   } else {
+   }
+
+   if (! $cdh)
+   {
       $config{input} = 1;
       $config{CD_DEVICE} = $cddev;
       $config{CDDB_MODE} = "http";
-      $config{CDDB_HOST} = "us.freedb.org";
+      $config{CDDB_HOST} = "ca.freedb.org";
       $config{CDDB_PORT} = 8880;
       $cdh = get_cddb(\%config);
    }
@@ -148,7 +166,7 @@ sub get_disc_info {
       $ret = 1;
    } else {
       my ($id2, $tot, $toc);
-      my $diskid=get_discids();
+      my $diskid=get_discids($cddev);
       $id2=$diskid->[0];
       $tot=$diskid->[1];
       $toc=$diskid->[2];
@@ -250,7 +268,7 @@ sub read_local_cddb {
    my $cd;
 
    my ($id2, $tot, $toc);
-   my $diskid=get_discids();
+   my $diskid=get_discids($cddev);
    $id2=$diskid->[0];
    $tot=$diskid->[1];
    $toc=$diskid->[2];
@@ -336,15 +354,19 @@ my $rip_tag;
 sub rip_tag {
    my $cd = shift;
 
-   $cmd1 = "cdparanoia -d $cddev -v -B";
+   $cmd1 = $cdparanoia_path . " -d $cddev -v -B 1-";
    system($cmd1);
 
-   $cmd2 = qq(id3ren -quiet -tag -tagonly);
-   $cmd2 .= qq( -artist="$cd->{artist}" -album="$cd->{title}");
+   $cmd2 = $id3ren_path . " -quiet -tag -tagonly";
+#   $cmd2 .= qq( -artist=") . escape_quotes($cd->{artist}) .
+#            qq(" -album=") . escape_quotes($cd->{title}) . qq(");
+   $cmd2 .= qq( -artist=) . (shell_quote $cd->{artist}) .
+            qq( -album=) . (shell_quote $cd->{title});
    if ($cd->{year} eq "") {
       $cmd2 .= qq( -noyear);
    } else {
-      $cmd2 .= qq( -year="$cd->{year}");
+#      $cmd2 .= qq( -year=") . escape_quotes($cd->{year}) . qq(");
+      $cmd2 .= qq( -year=) . (shell_quote $cd->{year});
    }
    $cmd2 .= qq( -nogenre -comment="ripped by grub");
    $num = 0;
@@ -360,7 +382,8 @@ sub rip_tag {
       if ($track eq "") {
          $cmd3 .= qq( -track="$num" -song="");
       } else {
-         $cmd3 .= qq( -track="$num" -song="$track");
+#         $cmd3 .= qq( -track="$num" -song="$track");
+         $cmd3 .= qq( -track="$num" -song=) . (shell_quote $track);
       }
 
       $fname = fixname(qq($cd->{artist}-$cd->{title}-$num2-$track.mp3));
@@ -368,7 +391,7 @@ sub rip_tag {
       $cmd3 .= " $fname";
 
       # encode mp3
-      $cmd4 = qq(lame -h -b 192 track$num2.cdda.wav '$fname');
+      $cmd4 = $lame_path . qq( -h -b 320 track$num2.cdda.wav '$fname');
       system($cmd4);
 
       # tag new mp3, delete .wav
@@ -386,4 +409,18 @@ sub rip_tag {
    system("mv *.mp3 $arname/$alname");
 
    print "\n";
+}
+
+my $escape_quotes;
+sub escape_quotes {
+
+   my $in = shift;
+   my $out = "";
+
+   if ($in && ($in ne "")) {
+      $out = $in;
+      $out =~ s/"/\\"/g;
+   }
+
+   return $out;
 }
